@@ -1,0 +1,456 @@
+---
+title: "Can demographic and physiological features predict the likelihood of a stroke?"
+author: "Monirul Islam"
+date: "2025-12-18"
+output: pdf_document
+---
+
+```{r, include=FALSE}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(caret)  
+library(pROC)
+library(car)
+```
+
+# Load Data
+
+```{r}
+data = read.csv("~/STA9797/Final Project/dataset.csv")
+head(data)
+dim(data)
+```
+
+# Handling Missing Values 
+
+```{r}
+# Count of Na values and empty cells
+colSums(is.na(data) | data=="")
+
+# Remove Na values, empty cells, and "id" column
+data = data |>
+  filter(
+    !is.na(bmi), bmi != "",
+    !is.na(smoking_status), smoking_status != "") |>
+  select(-id)
+
+# Re-check 
+colSums(is.na(data) | data=="")
+dim(data)
+```
+
+# Prepare Variables For Anova
+
+```{r}
+data$stroke = factor(data$stroke, levels=c(0,1), labels=c("No Stroke", "Stroke"))
+
+data$gender = factor(data$gender)
+data$ever_married = factor(data$ever_married)
+data$work_type = factor(data$work_type)
+data$Residence_type = factor(data$Residence_type)
+
+data = data |>
+  mutate(hypertension=factor(hypertension, levels=c(0,1), labels=c("No","Yes")),
+         heart_disease=factor(heart_disease, levels=c(0,1), labels=c("No","Yes")),
+         smoking_status_new=factor(ifelse(smoking_status=="never smoked",0,1), 
+                            levels=c(0,1), 
+                            labels=c("Never Smoked","Ever Smoked")))
+data = data |>
+  select(-smoking_status)
+
+data2 = data
+
+head(data)
+```
+
+
+# Exploratory Data Analysis 
+
+## Target Variable 
+
+```{r}
+# Distribution of the target variable (stroke)
+ggplot(data, aes(x=stroke)) +
+  geom_bar(fill="darkred", color="black") +
+  geom_text(stat="count", aes(label=after_stat(count)), vjust=-0.25) +
+  labs(title="Distribution of Stroke",
+       x="Stroke",
+       y="Frequency") +
+  theme_minimal()
+```
+
+## Continuous Predictors 
+
+```{r}
+# Age 
+ggplot(data, aes(x=age)) +
+  geom_histogram(bins=30, fill="lightblue", color="black") +
+  geom_vline(aes(xintercept = mean(age)), color="red") +
+  labs(title="Distribution of Age",
+       x="Age",
+       y="Frequency") +
+  theme_minimal()
+```
+
+```{r}
+# BMI
+ggplot(data, aes(x=bmi)) +
+  geom_histogram(bins=30, fill="lightgreen", color="black") +
+  geom_vline(aes(xintercept = mean(bmi)), color="red") +
+  labs(title="Distribution of Body Mass Index",
+       x="BMI",
+       y="Frequency") +
+  theme_minimal()
+```
+
+```{r}
+# Average Glucose Levels 
+ggplot(data, aes(x=avg_glucose_level)) +
+  geom_histogram(bins=30, fill="orange", color="black") +
+  geom_vline(aes(xintercept = mean(avg_glucose_level)), color="red") +
+  labs(title="Distribution of Average Glucose Levels",
+       x="Average Glucose Levels",
+       y="Frequency") +
+  theme_minimal()
+```
+
+## Categorical Predictors 
+
+```{r}
+# Hypertension 
+ggplot(data, aes(x=hypertension)) +
+  geom_bar(fill="salmon", color="black") +
+  geom_text(stat="count", aes(label=after_stat(count)), vjust=-0.3) +
+   labs(title="Frequency of Hypertension",
+       x="Hypertension",
+       y="Frequency") +
+  theme_minimal()
+```
+
+```{r}
+# Heart Disease 
+ggplot(data, aes(x=heart_disease)) +
+  geom_bar(fill="maroon", color="black") +
+  geom_text(stat="count", aes(label=after_stat(count)), vjust=-0.3) +
+   labs(title="Heart Disease Frequency",
+       x="Heart Disease",
+       y="Frequency") +
+  theme_minimal()
+```
+
+```{r}
+# Smoking Status 
+ggplot(data, aes(x=smoking_status_new)) +
+  geom_bar(fill="gray", color="black") +
+  geom_text(stat="count", aes(label=after_stat(count)), vjust=-0.3) +
+   labs(title="Frequency of Non-Smokers vs Smokers",
+       x="Smoking Status",
+       y="Frequency") +
+  theme_minimal() 
+```
+
+# ANOVA analysis 
+
+```{r}
+stroke_glm = glm(stroke ~ gender + age + hypertension + heart_disease + ever_married + work_type + Residence_type + avg_glucose_level + bmi + smoking_status_new, data = data, family = binomial())
+
+Anova(stroke_glm, type = "II", test.statistic = "LR")
+```
+
+# Train/Test Split (70/30)
+
+```{r}
+set.seed(123)
+
+n = nrow(data)
+
+# Stratified train/test split (70%)
+train_idx = createDataPartition(data$stroke, p = 0.7, list = FALSE)
+
+train_data = data[train_idx, ]
+test_data  = data[-train_idx, ]
+```
+
+# Base Model 
+
+## K-fold Cross Validation On Training Set
+
+```{r}
+categorical_vars = c("gender", "ever_married", "work_type", "Residence_type",
+                     "hypertension", "heart_disease", "smoking_status_new")
+
+numerical_vars = c("age", "bmi", "avg_glucose_level")
+
+
+set.seed(123)
+k = 10
+folds = createFolds(train_data$stroke, k = k, returnTrain = FALSE)
+
+accuracy_vec  = numeric(k)
+sensitivity_vec = numeric(k)
+specificity_vec = numeric(k)
+
+for (i in 1:k) {
+
+  val_idx = folds[[i]]
+  train_fold = train_data[-val_idx, ]
+  val_fold = train_data[val_idx, ]
+
+  
+  for (v in categorical_vars) {
+    val_fold[[v]] = factor(val_fold[[v]], levels = levels(train_fold[[v]]))
+  }
+
+  # Standardize continuous variables
+  train_means = sapply(train_fold[, numerical_vars], mean)
+  train_sds   = sapply(train_fold[, numerical_vars], sd)
+
+  train_fold_sc = train_fold
+  val_fold_sc = val_fold
+
+  train_fold_sc[, numerical_vars] = scale(train_fold[, numerical_vars],
+                                       center = train_means,
+                                       scale  = train_sds)
+
+  val_fold_sc[, numerical_vars] = scale(val_fold[, numerical_vars],
+                                        center = train_means,
+                                        scale  = train_sds)
+
+  # Fit logistic regression
+  glm_fold = glm(stroke ~ gender + age + hypertension + heart_disease + ever_married + work_type + Residence_type + avg_glucose_level + bmi + smoking_status_new,
+                 data = train_fold_sc,
+                 family = binomial())
+
+  # Predict on validation fold
+  p_val = predict(glm_fold, newdata = val_fold_sc, type = "response")
+  pred_val = factor(ifelse(p_val > 0.10, "Stroke", "No Stroke"), levels = levels(val_fold_sc$stroke))
+
+  # Metrics
+  conf_matrix = confusionMatrix(pred_val, val_fold_sc$stroke, positive = "Stroke")
+  accuracy_vec[i]    = conf_matrix$overall["Accuracy"]
+  sensitivity_vec[i] = conf_matrix$byClass["Sensitivity"]
+  specificity_vec[i] = conf_matrix$byClass["Specificity"]
+}
+
+cv_metrics = data.frame(
+  fold = 1:k,
+  accuracy = accuracy_vec,
+  sensitivity = sensitivity_vec,
+  specificity = specificity_vec
+)
+
+cv_metrics
+```
+
+## Fit Base Model On Full Training Set 
+
+```{r}
+for (v in categorical_vars) {
+  test_data[[v]]  = factor(test_data[[v]], levels = levels(train_data[[v]]))
+}
+
+# Standardize continuous variables
+train_means = sapply(train_data[, numerical_vars], mean)
+train_sds   = sapply(train_data[, numerical_vars], sd)
+
+train_sc = train_data
+test_sc  = test_data
+
+train_sc[, numerical_vars] = scale(train_data[, numerical_vars],
+                                   center = train_means, 
+                                   scale = train_sds)
+
+test_sc[, numerical_vars]  = scale(test_data[, numerical_vars],
+                                   center = train_means, 
+                                   scale = train_sds)
+
+# Fit logistic regression
+base_glm = glm(stroke ~ gender + age + hypertension + heart_disease + ever_married + work_type + Residence_type + avg_glucose_level + bmi + smoking_status_new,
+               data = train_sc,
+               family = binomial())
+
+summary(base_glm)
+```
+
+## Odds Ratio Analysis
+
+```{r}
+coef_table = summary(base_glm)$coefficients
+odds_ratios = exp(coef_table[, "Estimate"])
+
+or = data.frame(
+  odds_ratio = odds_ratios,
+  p_value    = coef_table[, "Pr(>|z|)"]
+)
+
+or
+```
+
+## Test Set Evaluation
+
+```{r}
+p_test = predict(base_glm, newdata = test_sc, type = "response")
+pred_test = factor(ifelse(p_test > 0.10, "Stroke", "No Stroke"), levels = levels(test_sc$stroke))
+
+# Metrics
+conf_matrix = confusionMatrix(pred_test, test_sc$stroke, positive = "Stroke")
+
+base_accuracy = as.numeric(conf_matrix$overall["Accuracy"])
+base_accuracy
+
+base_sensitivity = as.numeric(conf_matrix$byClass["Sensitivity"])
+base_sensitivity 
+
+base_specificity = as.numeric(conf_matrix$byClass["Specificity"])
+base_specificity
+
+roc_base = roc(test_sc$stroke, p_test)
+base_auc = auc(roc_base)
+base_auc
+plot(roc_base, main = "ROC Curve for Base Logistic Regression Model")
+```
+
+# New Model
+
+## ANOVA Analysis
+
+```{r}
+new_stroke_glm = glm(stroke ~ age + hypertension + heart_disease + avg_glucose_level + bmi + smoking_status_new + hypertension*heart_disease + age*hypertension + age*heart_disease + smoking_status_new*age, data = data2, family = binomial())
+
+Anova(new_stroke_glm, type = "II", test.statistic = "LR")
+```
+
+## Train/Test Split (70/30)
+
+```{r}
+set.seed(123)
+
+n = nrow(data2)
+
+# Stratified train/test split (70%)
+train_idx = createDataPartition(data2$stroke, p = 0.7, list = FALSE)
+
+new_train_data = data2[train_idx, ]
+new_test_data  = data2[-train_idx, ]
+```
+
+## Fit New Model On Full Training Set 
+
+```{r}
+new_categorical_vars = c("hypertension", "heart_disease", "smoking_status_new")
+new_numerical_vars = c("age", "bmi", "avg_glucose_level")
+
+for (v in new_categorical_vars) {
+  new_test_data[[v]]  = factor(new_test_data[[v]], levels = levels(new_train_data[[v]]))
+}
+
+# Standardize continuous variables
+train_means = sapply(new_train_data[, new_numerical_vars], mean)
+train_sds   = sapply(new_train_data[, new_numerical_vars], sd)
+
+new_train_sc = new_train_data
+new_test_sc  = new_test_data
+
+new_train_sc[, new_numerical_vars] = scale(new_train_data[, new_numerical_vars],
+                                           center = train_means, 
+                                           scale = train_sds)
+
+new_test_sc[, new_numerical_vars]  = scale(new_test_data[, new_numerical_vars],
+                                           center = train_means, 
+                                           scale = train_sds)
+
+# Fit logistic regression
+new_glm = glm(stroke ~ age + hypertension + heart_disease + avg_glucose_level + bmi + smoking_status_new + hypertension*heart_disease + age*hypertension + age*heart_disease + smoking_status_new*age,
+              data = new_train_sc,
+              family = binomial())
+
+summary(new_glm)
+```
+
+## Odds Ratio 
+
+```{r}
+new_coef_table = summary(new_glm)$coefficients
+odds_ratios = exp(new_coef_table[, "Estimate"])
+
+new_or = data.frame(
+  odds_ratio = odds_ratios,
+  p_value    = new_coef_table[, "Pr(>|z|)"]
+)
+
+new_or
+```
+
+## Test Set Evaluation
+
+```{r}
+new_p_test = predict(new_glm, newdata = new_test_sc, type = "response")
+new_pred_test = factor(ifelse(new_p_test > 0.10, "Stroke", "No Stroke"), levels = levels(new_test_sc$stroke))
+
+# Metrics
+conf_matrix2 = confusionMatrix(new_pred_test, new_test_sc$stroke, positive = "Stroke")
+
+new_accuracy = as.numeric(conf_matrix2$overall["Accuracy"])
+new_accuracy
+
+new_sensitivity = as.numeric(conf_matrix2$byClass["Sensitivity"])
+new_sensitivity 
+
+new_specificity = as.numeric(conf_matrix2$byClass["Specificity"])
+new_specificity
+
+roc_new = roc(new_test_sc$stroke, new_p_test)
+new_auc = auc(roc_new)
+new_auc
+plot(roc_new, main = "ROC Curve for New Logistic Regression Model")
+```
+
+## Model Comparison (Base Vs New)
+
+```{r}
+model_comp = data.frame(
+  Model = c("Base Logistic Regression", "New Logistic Regression"),
+  Accuracy = c(base_accuracy, new_accuracy),
+  Sensitivity = c(base_sensitivity, new_sensitivity),
+  Specificity = c(base_specificity, new_specificity),
+  AUC = c(base_auc, new_auc)
+)
+
+model_comp
+```
+
+```{r}
+AIC(base_glm, new_glm)
+BIC(base_glm, new_glm)
+```
+
+
+# Bootstrap 
+
+```{r}
+set.seed(123)
+
+B = 5000
+N = nrow(new_test_sc)
+boot_sens = numeric(B)
+
+for (i in 1:B) {
+  id = sample(1:N, N, replace = TRUE)
+  boot_sample = new_test_sc[id, ]
+  
+  p_boot = predict(new_glm, newdata = boot_sample, type = "response")
+  pred_boot = factor(ifelse(p_boot > 0.1, "Stroke", "No Stroke"), levels = levels(boot_sample$stroke))
+  
+  conf_matrix_boot = confusionMatrix(pred_boot, boot_sample$stroke, positive = "Stroke")
+  boot_sens[i] = as.numeric(conf_matrix_boot$byClass["Sensitivity"])
+}
+
+boot_mean = mean(boot_sens)
+boot_mean
+boot_se = sd(boot_sens)   
+boot_se
+ci_sens = quantile(boot_sens, probs = c(0.025, 0.975))
+ci_sens
+
+```
