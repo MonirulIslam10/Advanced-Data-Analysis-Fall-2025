@@ -22,9 +22,9 @@ EDA was conducted to understand distributions and detect skewness, imbalance, an
 
 ## Modeling 
 ### Baseline Regression Model 
-- Included all covariates to establish baselines performance. 
+- Included all covariates to establish baseline performance. 
 - Assessed predictor significance using Type II ANOVA.
-  - Age, hypertension, heart disease, and average glucose levels were statistically significant ($p < 0.05). 
+  - Age, hypertension, heart disease, and average glucose levels were statistically significant ($p < 0.05$). 
 - 10-fold stratified cross-validation was used to prevent data leakage and maintain class proportions.
   - Continuous predictors were standardized within each fold. 
 - Classification threshold reduced from 0.5 to 0.10 to address class imbalance. 
